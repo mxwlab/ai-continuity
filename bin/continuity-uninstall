@@ -1,0 +1,169 @@
+#!/bin/sh
+# Remove AI Continuity's shell and MCP hooks. Local continuity data is kept
+# unless the caller explicitly passes --purge.
+set -eu
+
+usage() {
+  echo "usage: continuity-uninstall [--purge]" >&2
+}
+
+case "$#" in
+  0) PURGE=0 ;;
+  1)
+    if [ "$1" = "--purge" ]; then
+      PURGE=1
+    else
+      usage
+      exit 2
+    fi
+    ;;
+  *)
+    usage
+    exit 2
+    ;;
+esac
+
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+RUNTIME_PROJECT="$REPO"
+. "$REPO/bin/lib/continuity-common.sh"
+HOME_TARGET="${AI_CONTINUITY_HOME:-$HOME}"
+ZSHRC="$HOME_TARGET/.zshrc"
+BEGIN="# >>> ai-continuity >>>"
+END="# <<< ai-continuity <<<"
+DATA_DIR="${AI_CONTINUITY_DATA_DIR:-$HOME_TARGET/Library/Application Support/AI Continuity}"
+
+# Remove each exact [mcp_servers.ai-continuity] TOML table through the next
+# table header. The installer owns this table, but not any neighboring table.
+remove_codex_section() {
+  _config="$1"
+  _tmp="$_config.tmp.$$"
+  if ! awk '
+    {
+      lines[NR] = $0
+
+      if (!skip &&
+          $0 ~ /^[[:space:]]*\[mcp_servers[.]ai-continuity\][[:space:]]*$/) {
+        skip = 1
+        remove[NR] = 1
+        had_before = (NR > 1)
+        last_blank = 0
+        if (NR > 1 && lines[NR - 1] ~ /^[[:space:]]*$/) {
+          remove[NR - 1] = 1
+        }
+        next
+      }
+
+      if (skip) {
+        if ($0 ~ /^[[:space:]]*\[/) {
+          skip = 0
+          if (had_before && last_blank == NR - 1) {
+            remove[last_blank] = 0
+          }
+        } else {
+          remove[NR] = 1
+          if ($0 ~ /^[[:space:]]*$/) {
+            last_blank = NR
+          }
+        }
+      }
+    }
+
+    END {
+      for (i = 1; i <= NR; i++) {
+        if (!remove[i]) print lines[i]
+      }
+    }
+  ' "$_config" > "$_tmp"; then
+    rm -f "$_tmp"
+    return 1
+  fi
+  continuity_commit_edit "$_tmp" "$_config"
+}
+
+# Validate every destructive precondition before changing user files.
+if ! _shell_marker_state="$(continuity_marker_state "$ZSHRC" "$BEGIN" "$END")"; then
+  echo "refusing to edit $ZSHRC: invalid AI Continuity shell markers" >&2
+  exit 1
+fi
+
+if [ "$PURGE" = "1" ]; then
+  case "$DATA_DIR" in
+    /*) ;;
+    *)
+      echo "refusing purge: AI Continuity data directory must be absolute" >&2
+      exit 2
+      ;;
+  esac
+  case "$DATA_DIR" in
+    *"/../"*|*"/..")
+      echo "refusing purge: AI Continuity data directory contains '..'" >&2
+      exit 2
+      ;;
+  esac
+  case "$DATA_DIR" in
+    *[!/]*) ;;
+    *)
+      echo "refusing purge: AI Continuity data directory resolves to root" >&2
+      exit 2
+      ;;
+  esac
+  if [ -d "$DATA_DIR" ]; then
+    _physical_data_dir="$(cd "$DATA_DIR" && pwd -P)"
+    if [ "$_physical_data_dir" = "/" ]; then
+      echo "refusing purge: AI Continuity data directory resolves to root" >&2
+      exit 2
+    fi
+  fi
+fi
+
+# 1. Remove the shell block. Back up only immediately before a real mutation,
+# so a no-op second run cannot overwrite the useful pre-uninstall snapshot.
+if [ "$_shell_marker_state" = "present" ]; then
+  cp "$ZSHRC" "$ZSHRC.bak.continuity"
+  continuity_remove_block "$ZSHRC" "$BEGIN" "$END"
+fi
+
+# 2. Remove MCP registrations (skippable for hermetic tests and CI).
+if [ "${AI_CONTINUITY_SKIP_MCP:-0}" != "1" ]; then
+  if command -v claude >/dev/null 2>&1; then
+    if ! claude mcp remove ai-continuity >/dev/null 2>&1; then
+      echo "warning: Claude MCP removal failed; ai-continuity may already be absent. Verify with 'claude mcp list'." >&2
+    fi
+  fi
+
+  CODEX_CFG="$HOME_TARGET/.codex/config.toml"
+  if [ -f "$CODEX_CFG" ] &&
+     grep -q '^[[:space:]]*\[mcp_servers[.]ai-continuity\][[:space:]]*$' "$CODEX_CFG"; then
+    cp "$CODEX_CFG" "$CODEX_CFG.bak.continuity"
+    remove_codex_section "$CODEX_CFG"
+  fi
+fi
+
+# 3. Unload and remove the owned cleanup job (skippable for tests / CI).
+if [ "${AI_CONTINUITY_SKIP_LAUNCHD:-0}" != "1" ]; then
+  CLEANUP_LABEL="com.ai-continuity.cleanup"
+  CLEANUP_PLIST="$HOME_TARGET/Library/LaunchAgents/$CLEANUP_LABEL.plist"
+  if [ -f "$CLEANUP_PLIST" ] || [ -L "$CLEANUP_PLIST" ]; then
+    command -v launchctl >/dev/null 2>&1 || {
+      echo "error: launchctl not found; cleanup plist was preserved for retry" >&2
+      exit 1
+    }
+    if launchctl list "$CLEANUP_LABEL" >/dev/null 2>&1; then
+      if ! launchctl unload "$CLEANUP_PLIST" >/dev/null 2>&1; then
+        echo "error: failed to unload $CLEANUP_LABEL; plist was preserved for retry" >&2
+        exit 1
+      fi
+    fi
+    rm -f "$CLEANUP_PLIST"
+  fi
+fi
+
+# 4. Preserve data by default. --purge removes only the two owned children,
+# never the configured data root or unrelated files alongside them.
+if [ "$PURGE" = "1" ]; then
+  rm -rf "$DATA_DIR/runtime" "$DATA_DIR/logs"
+  echo "Purged AI Continuity runtime and logs at: $DATA_DIR"
+else
+  echo "AI Continuity uninstalled. User data preserved at: $DATA_DIR"
+  echo "(Run with --purge to delete its runtime and logs.)"
+fi

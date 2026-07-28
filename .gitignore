@@ -1,0 +1,5 @@
+__pycache__/
+.DS_Store
+.venv/
+.ai-continuity/desktop-context.md
+.ai-continuity/

@@ -1,0 +1,23 @@
+#!/bin/sh
+set -eu
+
+RUNTIME_PROJECT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$RUNTIME_PROJECT/bin/lib/continuity-common.sh"
+
+PROJECT_ROOT="${1:-$PWD}"
+CONVERSATION_ID="$(continuity_read_conversation "$PROJECT_ROOT")" || {
+  echo "render-desktop-context: no .ai-continuity/continuity.conf under $PROJECT_ROOT" >&2
+  exit 1
+}
+
+OUTPUT_DIR="$PROJECT_ROOT/.ai-continuity"
+OUTPUT_PATH="$OUTPUT_DIR/desktop-context.md"
+TMP_PATH="$OUTPUT_PATH.tmp.$$"
+PYTHON_BIN="${AI_CONTINUITY_PYTHON:-python3}"
+
+mkdir -p "$OUTPUT_DIR"
+"$PYTHON_BIN" "$RUNTIME_PROJECT/context_prompt.py" \
+  --conversation "$CONVERSATION_ID" > "$TMP_PATH"
+chmod 600 "$TMP_PATH"
+mv "$TMP_PATH" "$OUTPUT_PATH"
+printf '%s\n' "$OUTPUT_PATH"

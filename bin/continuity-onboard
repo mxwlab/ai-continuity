@@ -1,0 +1,67 @@
+#!/bin/sh
+set -eu
+
+RUNTIME_PROJECT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$RUNTIME_PROJECT/bin/lib/continuity-common.sh"
+
+[ $# -ge 1 ] || { echo "usage: continuity-onboard <project-path> [conversation-id]" >&2; exit 2; }
+PROJECT_ROOT="$(cd "$1" 2>/dev/null && pwd)" || { echo "not a directory: $1" >&2; exit 1; }
+SLUG="$(continuity_slug "$PROJECT_ROOT")"
+
+if [ -n "${2:-}" ]; then
+  CONVERSATION_ID="$2"
+else
+  _sanitized="$(continuity_sanitize_id "$SLUG")"
+  [ -n "$_sanitized" ] || { echo "cannot derive a conversation id from '$SLUG'; pass one explicitly" >&2; exit 1; }
+  CONVERSATION_ID="${_sanitized}-live"
+fi
+
+# Validate the final id (exact ID_PATTERN) BEFORE writing any state, so bad
+# input leaves nothing behind.
+continuity_valid_id "$CONVERSATION_ID" || {
+  echo "invalid conversation id '$CONVERSATION_ID': must start with a letter/number, use only letters, numbers, '.', '_' or '-', and be at most 128 chars" >&2
+  exit 1
+}
+
+CONF_DIR="$PROJECT_ROOT/.ai-continuity"
+_fresh_onboard=1
+if existing="$(continuity_read_conversation "$PROJECT_ROOT" 2>/dev/null)"; then
+  _fresh_onboard=0
+  # Validate an adopted marker id BEFORE any further state changes so a
+  # hand-corrupted marker fails fast instead of crashing mid-run.
+  continuity_valid_id "$existing" || {
+    echo "existing marker '$CONF_DIR/continuity.conf' has an invalid conversation id '$existing'; fix or remove it before onboarding" >&2
+    exit 1
+  }
+  if [ -n "${2:-}" ] && [ "$existing" != "$CONVERSATION_ID" ]; then
+    echo "already onboarded as '$existing'; refusing to change to '$CONVERSATION_ID'" >&2
+    exit 1
+  fi
+  CONVERSATION_ID="$existing"
+fi
+
+# Warn (non-fatally) when a FRESH onboard resolves to a conversation id that
+# already exists in the runtime: legitimate adoption of a pre-existing id
+# must still succeed, but two unrelated projects silently sharing context is
+# a common footgun worth flagging.
+if [ "$_fresh_onboard" = "1" ]; then
+  if python3 "$RUNTIME_PROJECT/continuity_runtime.py" context --conversation "$CONVERSATION_ID" >/dev/null 2>&1; then
+    echo "WARNING: conversation '$CONVERSATION_ID' already exists; if this is a DIFFERENT project, re-run with an explicit distinct conversation id to avoid sharing context across projects." >&2
+  fi
+fi
+
+mkdir -p "$CONF_DIR"
+printf 'AI_CONTINUITY_CONVERSATION=%s\n' "$CONVERSATION_ID" > "$CONF_DIR/continuity.conf"
+chmod 600 "$CONF_DIR/continuity.conf"
+
+continuity_ensure_gitignore "$PROJECT_ROOT"
+python3 "$RUNTIME_PROJECT/continuity_runtime.py" init --conversation "$CONVERSATION_ID" >/dev/null
+"$RUNTIME_PROJECT/bin/render-desktop-context" "$PROJECT_ROOT" >/dev/null
+continuity_write_rules "$PROJECT_ROOT" "$CONVERSATION_ID"
+
+if [ "${AI_CONTINUITY_SKIP_LAUNCHD:-0}" != "1" ]; then
+  continuity_install_launchd "$PROJECT_ROOT" "$RUNTIME_PROJECT"
+fi
+
+echo "Onboarded '$SLUG' as conversation '$CONVERSATION_ID'."
+echo "Restart your desktop app once to pick up the new projection."

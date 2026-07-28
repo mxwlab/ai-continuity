@@ -1,0 +1,64 @@
+#!/bin/sh
+# Release scrub gate. Default: scan every tracked file that is not removed
+# from release archives by an export-ignore attribute.
+# --scan-text MODE scans a literal string instead (used by tests).
+set -eu
+
+# Assemble sensitive tokens at runtime so this shipped gate can scan its own
+# source without embedding the values it rejects.
+_author='moxi''uwen'
+_mac_home='/Us''ers/'
+_account='m194''1696989'
+_provider='DEEP''SEEK'
+_service='fei''shu'
+_prototype='P''0'
+_internal_shadow='ai-continuity-''shadow'
+_internal_live='ai-continuity-''live'
+_observation='one-''week'
+_shadow_label='shadow-''mode'
+_controlled_label='controlled ''live'
+PATTERNS="$_author|$_mac_home|$_account|$_provider|$_service|BEGIN [A-Z ]*PRIVATE KEY|$_prototype|$_internal_shadow|$_internal_live|$_observation|$_shadow_label|$_controlled_label"
+
+scan_stream() {  # reads stdin, prints matches, returns 0 if any match found
+  grep -nEi "$PATTERNS" || return 1
+}
+
+if [ "${1:-}" = "--scan-text" ]; then
+  if printf '%s\n' "$2" | scan_stream; then
+    echo "FORBIDDEN string found" >&2
+    exit 1
+  fi
+  exit 0
+fi
+
+# Return success when this path, or one of its tracked parent paths, is marked
+# export-ignore. Directory attributes remove the whole subtree from archives.
+is_export_ignored() {
+  _candidate="$1"
+  while :; do
+    _attribute="$(git check-attr export-ignore -- "$_candidate")"
+    case "$_attribute" in
+      *": export-ignore: set") return 0 ;;
+    esac
+    case "$_candidate" in
+      */*) _candidate="${_candidate%/*}" ;;
+      *) return 1 ;;
+    esac
+  done
+}
+
+# Default mode: scan tracked, shippable files, including this gate and its
+# release regression tests.
+cd "$(cd "$(dirname "$0")/.." && pwd)"
+files=$(git ls-files)
+hits=$(printf '%s\n' "$files" | while IFS= read -r f; do
+  [ -f "$f" ] || continue
+  is_export_ignored "$f" && continue
+  grep -nEiH "$PATTERNS" "$f" || true
+done)
+if [ -n "$hits" ]; then
+  echo "Release gate FAILED — forbidden strings in shipped files:" >&2
+  printf '%s\n' "$hits" >&2
+  exit 1
+fi
+echo "Release gate PASSED."

@@ -1,0 +1,13 @@
+#!/bin/zsh
+set -eu
+
+RUNTIME_PROJECT="${0:A:h:h}"
+if [[ -z "${AI_CONTINUITY_CONVERSATION:-}" ]]; then
+  print -u2 "codex-continuity: AI_CONTINUITY_CONVERSATION is required"
+  exit 2
+fi
+CONVERSATION_ID="$AI_CONTINUITY_CONVERSATION"
+CONTEXT_TOML_VALUE="$(python3 "$RUNTIME_PROJECT/context_prompt.py" --conversation "$CONVERSATION_ID" --json-string)"
+CODEX_BIN="${AI_CONTINUITY_CODEX_BIN:-$(command -v codex)}"
+
+exec "$CODEX_BIN" -c "developer_instructions=$CONTEXT_TOML_VALUE" "$@"

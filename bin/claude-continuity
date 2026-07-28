@@ -1,0 +1,12 @@
+#!/bin/zsh
+set -eu
+
+RUNTIME_PROJECT="${0:A:h:h}"
+if [[ -z "${AI_CONTINUITY_CONVERSATION:-}" ]]; then
+  print -u2 "claude-continuity: AI_CONTINUITY_CONVERSATION is required"
+  exit 2
+fi
+CONVERSATION_ID="$AI_CONTINUITY_CONVERSATION"
+CONTEXT="$(python3 "$RUNTIME_PROJECT/context_prompt.py" --conversation "$CONVERSATION_ID")"
+
+exec claude --append-system-prompt "$CONTEXT" "$@"

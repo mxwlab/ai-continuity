@@ -1,0 +1,9 @@
+#!/bin/zsh
+set -eu
+
+RUNTIME_PROJECT="${0:A:h:h}"
+LOG_DIR="${AI_CONTINUITY_DATA_DIR:-$HOME/Library/Application Support/AI Continuity}/logs"
+PYTHON_BIN="${AI_CONTINUITY_PYTHON:-python3}"
+mkdir -p "$LOG_DIR"
+
+"$PYTHON_BIN" "$RUNTIME_PROJECT/continuity_runtime.py" cleanup --days 30 >>"$LOG_DIR/cleanup.log" 2>&1

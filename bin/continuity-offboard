@@ -1,0 +1,41 @@
+#!/bin/sh
+set -eu
+
+RUNTIME_PROJECT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$RUNTIME_PROJECT/bin/lib/continuity-common.sh"
+
+[ $# -ge 1 ] || { echo "usage: continuity-offboard <project-path>" >&2; exit 2; }
+PROJECT_ROOT="$(cd "$1" 2>/dev/null && pwd)" || { echo "not a directory: $1" >&2; exit 1; }
+SLUG="$(continuity_slug "$PROJECT_ROOT")"
+
+_begin="<!-- BEGIN ai-continuity -->"
+_end="<!-- END ai-continuity -->"
+for _rules in "$PROJECT_ROOT/AGENTS.md" "$PROJECT_ROOT/CLAUDE.md"; do
+  if ! continuity_marker_state "$_rules" "$_begin" "$_end" >/dev/null; then
+    echo "error: invalid AI Continuity marker structure in $_rules; project state was preserved" >&2
+    exit 1
+  fi
+done
+
+_label="$(continuity_launchd_label "$PROJECT_ROOT")"
+_plist="$HOME/Library/LaunchAgents/$_label.plist"
+# Symmetric with onboard: when skipping launchd, leave the plist entirely
+# alone (no unload, no rm) so a loaded job is never orphaned.
+if [ "${AI_CONTINUITY_SKIP_LAUNCHD:-0}" != "1" ]; then
+  if [ -f "$_plist" ]; then
+    if launchctl list "$_label" >/dev/null 2>&1; then
+      if ! launchctl unload "$_plist" >/dev/null 2>&1; then
+        echo "error: failed to unload $_label; project state and plist were preserved for retry" >&2
+        exit 1
+      fi
+    fi
+    rm -f "$_plist"
+  fi
+fi
+rm -f "$PROJECT_ROOT/.ai-continuity/continuity.conf"
+rm -f "$PROJECT_ROOT/.ai-continuity/desktop-context.md"
+
+continuity_remove_block "$PROJECT_ROOT/AGENTS.md" "$_begin" "$_end"
+continuity_remove_block "$PROJECT_ROOT/CLAUDE.md" "$_begin" "$_end"
+
+echo "Offboarded '$SLUG' (removed marker, projection, rules block, launch agent). Event history preserved."

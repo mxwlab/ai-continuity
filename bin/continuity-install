@@ -1,0 +1,118 @@
+#!/bin/sh
+# bin/continuity-install
+# Idempotent installer: hooks the shell into continuity-shell-init.sh,
+# registers the local MCP server with Claude Code / Codex, and installs the
+# daily launchd cleanup job. Safe to run more than once.
+set -eu
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+RUNTIME_PROJECT="$REPO"
+. "$REPO/bin/lib/continuity-common.sh"
+HOME_TARGET="${AI_CONTINUITY_HOME:-$HOME}"
+ZSHRC="$HOME_TARGET/.zshrc"
+BEGIN="# >>> ai-continuity >>>"
+END="# <<< ai-continuity <<<"
+SRC_LINE="source \"$REPO/bin/continuity-shell-init.sh\""
+DATA_DIR="${AI_CONTINUITY_DATA_DIR:-$HOME_TARGET/Library/Application Support/AI Continuity}"
+
+# 1. Preconditions
+PYTHON_BIN="$(command -v python3)" || { echo "python3 not found" >&2; exit 1; }
+
+# 2. Shell hookup (idempotent, backed up, never clobbers user content)
+# Back up ONLY inside the mutation branch, so a no-op re-run never overwrites
+# the pristine backup taken on the first install.
+_already_installed=0
+if ! _shell_marker_state="$(continuity_marker_state "$ZSHRC" "$BEGIN" "$END")"; then
+  echo "refusing to edit $ZSHRC: invalid AI Continuity shell markers" >&2
+  exit 1
+fi
+if [ "$_shell_marker_state" = "present" ]; then
+  _already_installed=1
+fi
+if [ "$_already_installed" = "1" ]; then
+  :  # already installed
+else
+  [ -f "$ZSHRC" ] && cp "$ZSHRC" "$ZSHRC.bak.continuity"
+  [ -f "$ZSHRC" ] && printf '\n' >> "$ZSHRC"
+  printf '%s\n%s\n%s\n' "$BEGIN" "$SRC_LINE" "$END" >> "$ZSHRC"
+fi
+
+# 3. MCP registration (skippable for tests / CI)
+if [ "${AI_CONTINUITY_SKIP_MCP:-0}" != "1" ]; then
+  if command -v claude >/dev/null 2>&1; then
+    if ! claude mcp add --scope user ai-continuity -- \
+         python3 "$REPO/continuity_mcp.py" 2>/dev/null; then
+      echo "warning: Claude MCP user-scope registration failed; ai-continuity may already be registered. Verify with 'claude mcp get ai-continuity'." >&2
+    fi
+  fi
+  CODEX_CFG="$HOME_TARGET/.codex/config.toml"
+  if command -v codex >/dev/null 2>&1; then
+    mkdir -p "$(dirname "$CODEX_CFG")"
+    _codex_already=0
+    if [ -f "$CODEX_CFG" ] && grep -qxF "[mcp_servers.ai-continuity]" "$CODEX_CFG"; then
+      _codex_already=1
+    fi
+    if [ "$_codex_already" != "1" ]; then
+      # Back up ONLY before the actual append, so a no-op re-run never
+      # overwrites the pristine backup taken on the first install.
+      [ -f "$CODEX_CFG" ] && cp "$CODEX_CFG" "$CODEX_CFG.bak.continuity"
+      cat >> "$CODEX_CFG" <<EOF
+
+[mcp_servers.ai-continuity]
+command = "python3"
+args = ["$REPO/continuity_mcp.py"]
+EOF
+    fi
+  fi
+fi
+
+# 4. Daily 02:30 retention-cleanup launchd job (skippable for tests / CI).
+if [ "${AI_CONTINUITY_SKIP_LAUNCHD:-0}" != "1" ]; then
+  CLEANUP_LABEL="com.ai-continuity.cleanup"
+  CLEANUP_PLIST="$HOME_TARGET/Library/LaunchAgents/$CLEANUP_LABEL.plist"
+  mkdir -p "$(dirname "$CLEANUP_PLIST")"
+  command -v launchctl >/dev/null 2>&1 || {
+    echo "launchctl not found; cleanup job was not installed" >&2
+    exit 1
+  }
+  if launchctl list "$CLEANUP_LABEL" >/dev/null 2>&1; then
+    if ! launchctl unload "$CLEANUP_PLIST" >/dev/null 2>&1; then
+      echo "error: failed to unload $CLEANUP_LABEL; existing plist was preserved for retry" >&2
+      exit 1
+    fi
+  fi
+  _x_cleanup_label="$(continuity_xml_escape "$CLEANUP_LABEL")"
+  _x_cleanup_program="$(continuity_xml_escape "$REPO/bin/cleanup-runtime")"
+  _x_cleanup_data="$(continuity_xml_escape "$DATA_DIR")"
+  _x_cleanup_python="$(continuity_xml_escape "$PYTHON_BIN")"
+  cat > "$CLEANUP_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$_x_cleanup_label</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$_x_cleanup_program</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>AI_CONTINUITY_DATA_DIR</key><string>$_x_cleanup_data</string>
+    <key>AI_CONTINUITY_PYTHON</key><string>$_x_cleanup_python</string>
+  </dict>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>2</integer>
+    <key>Minute</key><integer>30</integer>
+  </dict>
+</dict>
+</plist>
+EOF
+  launchctl load "$CLEANUP_PLIST"
+fi
+
+cat <<EOF
+AI Continuity installed.
+Next: open a new terminal, then in any project run:
+  $REPO/bin/continuity-onboard .
+Then launch 'claude' or 'codex' inside that project.
+EOF
